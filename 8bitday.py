@@ -29,12 +29,15 @@ FILES = ["01-Early-Morning.jpg",
 
 class Weather(object):
 
-    def __init__(self, location):
-        try:
-            self.weather = pywapi.get_weather_from_yahoo(location)
-            self._cache_weather(self.weather)
-        except:
+    def __init__(self, location, cached=False):
+        if cached == True:
             self.weather = self._cache_weather()
+        else:
+            try:
+                self.weather = pywapi.get_weather_from_yahoo(location)
+                self._cache_weather(self.weather)
+            except:
+                self.weather = self._cache_weather()
 
     def _cache_weather(self, weather_json=None):
         cache = resource_filename(__name__, '.last_weather.json')
@@ -74,6 +77,8 @@ def set_wallpaper(filename):
     if write:
         with open(CONFIG, 'wb') as fh:
             cfg.write(fh)
+
+        os.environ['DISPLAY'] = ":0.0"
         subprocess.call(["/usr/bin/nitrogen", "--restore"])
 
 
