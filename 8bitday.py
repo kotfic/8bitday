@@ -1,12 +1,18 @@
 from pkg_resources import resource_filename
-import datetime as dt
-from dateutil.parser import parse
+from datetime import datetime as dt
+from datetime import timedelta
 import subprocess
-import pywapi
 import json
+import requests
 import argparse
 import time
 import os
+import sys
+
+try:
+    from io import StringIO
+except ImportError:
+    from cStringIO import StringIO
 
 try:
     import ConfigParser as cp
@@ -14,7 +20,7 @@ except ImportError:
     import configparser as cp
 
 
-CONFIG = "/home/kotfic/.config/nitrogen/bg-saved.cfg"
+CONFIG = os.path.expanduser("~/.config/nitrogen/bg-saved.cfg")
 
 FILES = ["01-Early-Morning.jpg",
          "02-Morning.jpg",
@@ -29,15 +35,28 @@ FILES = ["01-Early-Morning.jpg",
 
 class Weather(object):
 
-    def __init__(self, location, cached=False):
+    def __init__(self, cached=False):
+        self.config = cp.ConfigParser()
+        self.config.readfp(open(resource_filename(__name__, 'config')))
+
+        self._api_key = self.config.get("default", "api_key")
+        self._lat = self.config.get("default", "latitude")
+        self._lon = self.config.get("default", "longitude")
+
         if cached == True:
             self.weather = self._cache_weather()
         else:
             try:
-                self.weather = pywapi.get_weather_from_yahoo(location)
+                self.weather = self.fetch_weather()
                 self._cache_weather(self.weather)
             except:
                 self.weather = self._cache_weather()
+
+    def fetch_weather(self):
+        r = requests.get("https://api.forecast.io/forecast/{}/{},{}".format(
+            self._api_key, self._lat, self._lon))
+        return r.json()
+
 
     def _cache_weather(self, weather_json=None):
         cache = resource_filename(__name__, '.last_weather.json')
@@ -52,11 +71,17 @@ class Weather(object):
 
     @property
     def sunrise(self):
-        return parse(self.weather['astronomy']['sunrise'])
+        return dt.fromtimestamp(
+            self.weather['daily']['data'][0]['sunriseTime'])
 
     @property
     def sunset(self):
-        return parse(self.weather['astronomy']['sunset'])
+        return dt.fromtimestamp(
+            self.weather['daily']['data'][0]['sunsetTime'])
+
+    @property
+    def timezone(self):
+        return self.weather['timezone']
 
     def get_weather(self):
         # For now we only have sunny
@@ -64,90 +89,79 @@ class Weather(object):
 
 
 def set_wallpaper(filename):
-    write = False
+    nitrogen_config = """
+[xin_0]
+file={0}
+mode=0
+bgcolor=#000000
+
+[xin_1]
+file={0}
+mode=0
+bgcolor=#000000
+""".format(filename)
 
     cfg = cp.ConfigParser()
-    cfg.read(CONFIG)
+    cfg.readfp(StringIO(nitrogen_config.decode('utf-8')))
 
-    for section in cfg.sections():
-        if cfg.get(section, "file") != filename:
-            cfg.set(section, "file", filename)
-            write = True
+    with open(CONFIG, 'wb') as fh:
+        cfg.write(fh)
 
-    if write:
-        with open(CONFIG, 'wb') as fh:
-            cfg.write(fh)
-
-        os.environ['DISPLAY'] = ":0.0"
-        subprocess.call(["/usr/bin/nitrogen", "--restore"])
+    os.environ['DISPLAY'] = ":0.0"
+    subprocess.call(["/usr/bin/nitrogen", "--restore"])
 
 
 def base_dir():
     return resource_filename(__name__, 'img/')
 
 
+cutoffs = [
+    ("08-Late-Night.png", lambda w: w.sunrise - timedelta(hours=2)),
+    ("07-Night.png", lambda w: w.sunrise),
+    ("01-Morning.png", lambda w: w.sunrise + timedelta(hours=1)),
+    ("02-Late-Morning.png", lambda w: w.sunrise + ((w.sunset - w.sunrise) / 2)),
+    ("03-Afternoon.png", lambda w: w.sunset - timedelta(hours=1)),
+    ("04-Late-Afternoon.png", lambda w: w.sunset - timedelta(minutes=30)),
+    ("05-Evening.png", lambda w: w.sunset - timedelta(minutes=15)),
+    ("06-Late-Evening.png", lambda w: w.sunset + timedelta(minutes=5)),
+    ("07-Night.png", lambda w: w.sunset + timedelta(hours=3))]
+
+
 def get_file_name(now, w):
-    
-    # Well before sunrise
-    if now < (w.sunrise - dt.timedelta(hours=2)):
-        return "08-Late-Night.png"
+    for filename, func in cutoffs:
+        if now < func(w):
+            return filename
 
-    #Sunrise
-    elif now < w.sunrise:
-        return "07-Night.png"
-
-    # Early Morning
-    elif now < (w.sunrise + dt.timedelta(hours=1)):
-        return "01-Morning.png"
-
-    # Until Midday
-    elif now < (w.sunrise +  ((w.sunset - w.sunrise) / 2)):
-        return "02-Late-Morning.png"
-
-    elif now < (w.sunset - dt.timedelta(hours=1)):
-        return "03-Afternoon.png"
-
-    # Late Afternoon
-    elif now < (w.sunset - dt.timedelta(minutes=30)):
-        return "04-Late-Afternoon.png"
-
-    # Sun setting
-    elif now < (w.sunset - dt.timedelta(minutes=15)):
-        return "05-Evening.png"
-
-    # Through Sunset
-    elif now < (w.sunset + dt.timedelta(minutes=5)):
-        return "06-Late-Evening.png"
-
-    # Early Night
-    elif now < (w.sunset + dt.timedelta(hours=3)):
-        return "07-Night.png"
-
-    else:
-        return "08-Late-Night.png"
+    return "08-Late-Night.png"
 
 
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--cycle", "-c", type=float)
-    parser.add_argument("--debug", "-d", type=str)
+    parser.add_argument("--debug", "-d", action="store_true")
 
     args = parser.parse_args()
 
-    w = Weather("12180")
-    now = dt.datetime.now()
+    if args.debug:
+        try:
+            import pudb; pu.db
+        except ImportError:
+            import pdb; pdb.set_trace()
+
+
+    w = Weather()
+    now = dt.now()
 
     if args.cycle:
-        for f in sorted(os.listdir(os.path.join(base_dir(),
-                                                w.get_weather()))):
+        print("NOW: {}".format(now.isoformat()))
+
+        for f, func in cutoffs:
+            print("{}: {}".format(f, func(w).isoformat()))
+
             set_wallpaper(os.path.join(base_dir(), w.get_weather(), f))
             time.sleep(args.cycle)
 
-    if args.debug:
-        print(w.sunrise)
-        print(w.sunset)
-        now = parse(args.debug)
 
     set_wallpaper(os.path.join(base_dir(),
                                w.get_weather(),
